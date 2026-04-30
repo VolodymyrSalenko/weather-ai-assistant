@@ -148,8 +148,16 @@ def average_number(values: list[Any], default: float = 0) -> float:
 
 def forecast_date_for(day: str) -> date:
     today = datetime.now(ZURICH_TZ).date()
+
+    if day.startswith("date:"):
+        return date.fromisoformat(day.split(":", maxsplit=1)[1])
+
     if day == "tomorrow":
         return today + timedelta(days=1)
+
+    if day == "day_after_tomorrow":
+        return today + timedelta(days=2)
+
     return today
 
 
@@ -293,4 +301,84 @@ def build_weather_context(
             "tone": preferences.get("tone"),
             "daytime_alerts": preferences.get("daytime_alerts"),
         },
+    }
+
+
+def available_forecast_dates(weather_json: dict[str, Any]) -> list[date]:
+    dates = []
+
+    for date_text in (weather_json.get("daily") or {}).get("time") or []:
+        try:
+            dates.append(date.fromisoformat(date_text))
+        except (TypeError, ValueError):
+            continue
+
+    return dates
+
+
+def dates_between(start_date: date, end_date: date) -> list[date]:
+    days = (end_date - start_date).days
+
+    if days < 0:
+        return []
+
+    return [start_date + timedelta(days=offset) for offset in range(days + 1)]
+
+
+def user_preferences_context(preferences: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "cold_sensitivity": preferences.get("cold_sensitivity"),
+        "heat_sensitivity": preferences.get("heat_sensitivity"),
+        "bad_weather_sensitivity": preferences.get("bad_weather_sensitivity"),
+        "recommendation_style": preferences.get("recommendation_style"),
+        "tone": preferences.get("tone"),
+        "daytime_alerts": preferences.get("daytime_alerts"),
+    }
+
+
+def build_weather_period_context(
+    weather_json: dict[str, Any],
+    preferences: dict[str, Any],
+    location: dict[str, Any],
+    period: dict[str, Any],
+) -> dict[str, Any]:
+    period_type = period.get("type") or "today"
+    start_date_text = period.get("start_date") or period.get("date")
+    end_date_text = period.get("end_date") or period.get("date") or start_date_text
+
+    if start_date_text is None or end_date_text is None:
+        start_date = datetime.now(ZURICH_TZ).date()
+        end_date = start_date
+    else:
+        start_date = date.fromisoformat(start_date_text)
+        end_date = date.fromisoformat(end_date_text)
+
+    forecast_dates = set(available_forecast_dates(weather_json))
+    selected_dates = [
+        forecast_date for forecast_date in dates_between(start_date, end_date)
+        if forecast_date in forecast_dates
+    ]
+
+    daily_contexts = []
+
+    for forecast_date in selected_dates:
+        context = build_weather_context(
+            weather_json,
+            preferences,
+            location,
+            day=f"date:{forecast_date.isoformat()}",
+        )
+        context["date"] = forecast_date.isoformat()
+        context["weekday"] = forecast_date.strftime("%A")
+        daily_contexts.append(context)
+
+    return {
+        "location": location.get("city"),
+        "postal_code": location.get("postal_code"),
+        "period_type": period_type,
+        "period_label": period.get("label"),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "daily_contexts": daily_contexts,
+        "user_preferences": user_preferences_context(preferences),
     }

@@ -85,6 +85,23 @@ WHERE postal_code = %s
 ORDER BY city;
 """
 
+FIND_POSTAL_CODE_LOCATION_SQL = """
+SELECT id, postal_code, city, canton, latitude, longitude
+FROM postal_codes
+WHERE
+    (%s = TRUE AND postal_code = %s)
+    OR (%s = FALSE AND city ILIKE %s)
+ORDER BY
+    CASE
+        WHEN lower(city) = lower(%s) THEN 0
+        WHEN city ILIKE %s THEN 1
+        ELSE 2
+    END,
+    city,
+    postal_code
+LIMIT 1;
+"""
+
 ACTIVE_POSTAL_CODE_LOCATIONS_SQL = """
 SELECT DISTINCT pc.id, pc.postal_code, pc.city, pc.canton, pc.latitude, pc.longitude
 FROM preferences p
@@ -409,6 +426,33 @@ def lookup_postal_code(postal_code: str) -> list[dict[str, Any]]:
             rows = cursor.fetchall()
 
     return [row_to_postal_code_location(row) for row in rows]
+
+
+def find_postal_code_location(query: str) -> dict[str, Any] | None:
+    cleaned_query = query.strip()
+    is_postal_code = cleaned_query.isdigit() and len(cleaned_query) == 4
+    city_query = f"%{cleaned_query}%"
+    city_prefix_query = f"{cleaned_query}%"
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                FIND_POSTAL_CODE_LOCATION_SQL,
+                (
+                    is_postal_code,
+                    cleaned_query,
+                    is_postal_code,
+                    city_query,
+                    cleaned_query,
+                    city_prefix_query,
+                ),
+            )
+            row = cursor.fetchone()
+
+    if row is None:
+        return None
+
+    return row_to_postal_code_location(row)
 
 
 def get_active_postal_code_locations() -> list[dict[str, Any]]:
