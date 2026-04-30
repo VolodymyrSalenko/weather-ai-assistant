@@ -1,3 +1,5 @@
+"""Run background weather refreshes, scheduled advice messages, and weather change alerts."""
+
 import asyncio
 from datetime import datetime, timedelta
 from typing import Any

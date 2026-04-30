@@ -1,3 +1,5 @@
+"""Provide PostgreSQL schema setup and data helpers for users, settings, forecasts, and notifications."""
+
 from datetime import date, datetime
 from typing import Any
 

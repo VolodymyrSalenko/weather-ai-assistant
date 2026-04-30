@@ -1,3 +1,5 @@
+"""Fetch Open-Meteo forecasts, store them, and convert raw weather data into structured context."""
+
 from datetime import date, datetime, timedelta
 from typing import Any
 

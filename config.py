@@ -1,3 +1,5 @@
+"""Load shared environment configuration for the Telegram bot, database, and weather services."""
+
 import os
 from zoneinfo import ZoneInfo
 

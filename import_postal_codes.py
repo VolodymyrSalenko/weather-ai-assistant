@@ -1,3 +1,5 @@
+"""Import Swiss postal code locations from geo.admin.ch into the PostgreSQL postal_codes table."""
+
 from __future__ import annotations
 
 import csv

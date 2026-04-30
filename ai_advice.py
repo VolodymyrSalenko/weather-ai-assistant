@@ -1,3 +1,5 @@
+"""Generate short daily weather advice through OpenRouter from structured weather context."""
+
 import json
 import os
 from typing import Any

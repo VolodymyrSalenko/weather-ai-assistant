@@ -1,3 +1,5 @@
+"""Run the aiogram Telegram bot, connect onboarding, settings, weather advice, and AI chat flows."""
+
 import asyncio
 import logging
 from datetime import date, datetime, timedelta

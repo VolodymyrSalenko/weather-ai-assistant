@@ -1,3 +1,5 @@
+"""Build Telegram reply and inline keyboards used by onboarding, settings, and Ask flows."""
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 

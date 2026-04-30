@@ -1,3 +1,5 @@
+"""Detect important forecast changes by comparing old and new structured Open-Meteo data."""
+
 from typing import Any
 
 from weather import hourly_rows_for_date, max_number, number_or_none

@@ -1,3 +1,5 @@
+"""Manage the Telegram onboarding conversation that collects and saves user weather preferences."""
+
 import asyncio
 import logging
 from typing import Any
