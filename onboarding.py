@@ -5,7 +5,7 @@ from typing import Any
 import psycopg
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from database import (
     delete_preferences,
@@ -192,19 +192,25 @@ def normalized_step_update(field: str, value: str) -> dict[str, Any]:
     return {field: value}
 
 
-async def start_onboarding(message: Message) -> None:
-    """Start clean onboarding session."""
-    user_id = message.from_user.id
-
+async def start_onboarding_for_user(chat_id: int, user_id: int, username: str | None) -> None:
     onboarding_sessions[user_id] = {
         "step_index": 0,
         "draft": {},
         "message_id": None,
-        "username": message.from_user.username,
-        "chat_id": message.chat.id,
+        "username": username,
+        "chat_id": chat_id,
     }
 
-    await send_current_question(message.chat.id, user_id)
+    await send_current_question(chat_id, user_id)
+
+
+async def start_onboarding(message: Message) -> None:
+    """Start clean onboarding session."""
+    await start_onboarding_for_user(
+        message.chat.id,
+        message.from_user.id,
+        message.from_user.username,
+    )
 
 
 async def send_current_question(chat_id: int, user_id: int) -> None:
@@ -432,14 +438,14 @@ async def finish_onboarding(user_id: int) -> None:
         await asyncio.to_thread(save_preferences, user_id, username, draft)
     except (psycopg.Error, RuntimeError):
         logger.exception("preferences save failed telegram_id=%s", user_id)
-        await bot.send_message(chat_id, "I could not save your preferences. Please try again later.")
+        await bot.send_message(chat_id, "I could not save your settings. Please try again later.")
         return
 
     onboarding_sessions.pop(user_id, None)
 
     await bot.send_message(
         chat_id,
-        "Preferences saved.",
+        "Settings saved.",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -455,12 +461,12 @@ async def handle_start(message: Message) -> None:
         saved_preferences = await asyncio.to_thread(get_saved_preferences, user["id"])
     except psycopg.Error:
         logger.exception("preferences lookup failed user_id=%s", user["id"])
-        await message.answer("I could not load your preferences. Please try again later.")
+        await message.answer("I could not load your settings. Please try again later.")
         return
 
     if saved_preferences:
         onboarding_sessions.pop(message.from_user.id, None)
-        await message.answer("Your preferences are ready.", reply_markup=main_menu_keyboard())
+        await message.answer("Your settings are ready.", reply_markup=main_menu_keyboard())
         return
 
     await start_onboarding(message)
@@ -477,12 +483,12 @@ async def handle_reset(message: Message) -> None:
         await asyncio.to_thread(delete_preferences, user["id"])
     except psycopg.Error:
         logger.exception("preferences delete failed user_id=%s", user["id"])
-        await message.answer("I could not reset your preferences. Please try again later.")
+        await message.answer("I could not change your settings. Please try again later.")
         return
 
     onboarding_sessions.pop(message.from_user.id, None)
 
-    await message.answer("Preferences reset. Let's set them up again.")
+    await message.answer("Let's change your settings.", reply_markup=ReplyKeyboardRemove())
     await start_onboarding(message)
 
 

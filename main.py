@@ -1,19 +1,26 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta
 
 import httpx
 import psycopg
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from ai_advice import generate_ai_advice
-from config import BOT_TOKEN
-from database import get_location_preferences_for_telegram_id, get_saved_preferences, setup_database, upsert_user
-from keyboards import main_menu_keyboard
+from config import BOT_TOKEN, ZURICH_TZ
+from database import (
+    delete_preferences,
+    get_location_preferences_for_telegram_id,
+    get_saved_preferences,
+    setup_database,
+    upsert_user,
+)
+from keyboards import change_settings_keyboard, main_menu_keyboard
 from onboarding import onboarding_sessions
 from onboarding import router as onboarding_router
-from onboarding import set_bot
+from onboarding import set_bot, start_onboarding_for_user
 from weather import build_weather_context, get_weather_for_user_from_db_or_fetch
 
 logging.basicConfig(level=logging.INFO)
@@ -25,78 +32,63 @@ set_bot(bot)
 dp.include_router(onboarding_router)
 
 
-@dp.callback_query(F.data == "menu:today")
-async def handle_today_menu(callback: CallbackQuery) -> None:
-    await callback.answer()
+def is_not_onboarding(message: Message) -> bool:
+    return bool(message.from_user and message.from_user.id not in onboarding_sessions)
 
-    telegram_id = callback.from_user.id
 
+def advice_header(context: dict, day: str) -> str:
+    target_date = datetime.now(ZURICH_TZ).date()
+    label = "Today"
+
+    if day == "tomorrow":
+        target_date += timedelta(days=1)
+        label = "Tomorrow"
+
+    city = str(context.get("location") or "Your location").upper()
+    date_text = f"{target_date.strftime('%a')}, {target_date.day} {target_date.strftime('%b')}"
+    return f"{city}\n{label} · {date_text}"
+
+
+async def build_weather_advice_message(telegram_id: int, day: str) -> str:
+    result = await asyncio.to_thread(get_weather_for_user_from_db_or_fetch, telegram_id)
+    context = build_weather_context(
+        result["weather_json"],
+        result["preferences"],
+        result["location"],
+        day=day,
+    )
+    advice = await asyncio.to_thread(generate_ai_advice, context)
+    return f"{advice_header(context, day)}\n\n{advice}"
+
+
+async def send_weather_advice(message: Message, telegram_id: int, day: str) -> None:
     try:
-        result = await asyncio.to_thread(get_weather_for_user_from_db_or_fetch, telegram_id)
-        context = build_weather_context(
-            result["weather_json"],
-            result["preferences"],
-            result["location"],
-            day="today",
-        )
-        message = await asyncio.to_thread(generate_ai_advice, context)
+        advice = await build_weather_advice_message(telegram_id, day)
     except httpx.HTTPError:
         logging.exception("weather advice request failed telegram_id=%s", telegram_id)
-        await callback.message.answer("I could not prepare the advice right now. Please try again later.")
+        await message.answer("I could not prepare the advice right now. Please try again later.")
         return
     except (psycopg.Error, RuntimeError):
-        logging.exception("today advice failed telegram_id=%s", telegram_id)
-        await callback.message.answer("I could not prepare your weather advice. Use /start or /reset if needed.")
+        logging.exception("%s advice failed telegram_id=%s", day, telegram_id)
+        await message.answer("I could not prepare your weather advice. Use /start or change settings if needed.")
         return
 
-    await callback.message.answer(message)
+    await message.answer(advice)
 
 
-@dp.callback_query(F.data == "menu:tomorrow")
-async def handle_tomorrow_menu(callback: CallbackQuery) -> None:
-    await callback.answer()
-
-    telegram_id = callback.from_user.id
-
-    try:
-        result = await asyncio.to_thread(get_weather_for_user_from_db_or_fetch, telegram_id)
-        context = build_weather_context(
-            result["weather_json"],
-            result["preferences"],
-            result["location"],
-            day="tomorrow",
-        )
-        message = await asyncio.to_thread(generate_ai_advice, context)
-    except httpx.HTTPError:
-        logging.exception("weather advice request failed telegram_id=%s", telegram_id)
-        await callback.message.answer("I could not prepare the advice right now. Please try again later.")
-        return
-    except (psycopg.Error, RuntimeError):
-        logging.exception("tomorrow advice failed telegram_id=%s", telegram_id)
-        await callback.message.answer("I could not prepare your weather advice. Use /start or /reset if needed.")
-        return
-
-    await callback.message.answer(message)
-
-
-@dp.callback_query(F.data == "menu:preferences")
-async def handle_preferences_menu(callback: CallbackQuery) -> None:
-    await callback.answer()
-
-    telegram_id = callback.from_user.id
-
+async def send_settings(message: Message, telegram_id: int) -> None:
     try:
         preferences = await asyncio.to_thread(
             get_location_preferences_for_telegram_id,
             telegram_id,
         )
     except psycopg.Error:
-        logging.exception("preferences menu failed telegram_id=%s", telegram_id)
-        await callback.message.answer("I could not load your preferences. Please try again later.")
+        logging.exception("settings menu failed telegram_id=%s", telegram_id)
+        await message.answer("I could not load your settings. Please try again later.")
         return
 
     if not preferences:
-        await callback.message.answer("No preferences found. Use /start to set up ANW.")
+        await message.answer("No settings found. Use /start to set up ANW.")
         return
 
     quiet_hours = "Off"
@@ -105,7 +97,7 @@ async def handle_preferences_menu(callback: CallbackQuery) -> None:
 
     text = "\n".join(
         [
-            "Your preferences:",
+            "Your settings:",
             "",
             f"Location: {preferences.get('postal_code')} {preferences.get('city')}",
             f"Morning advice: {preferences.get('morning_time')}",
@@ -118,16 +110,76 @@ async def handle_preferences_menu(callback: CallbackQuery) -> None:
             f"Tone: {preferences.get('tone')}",
             f"Weather changes: {preferences.get('daytime_alerts')}",
             "",
-            "To change preferences, use /reset.",
+            "To change settings, use the button below.",
         ]
     )
 
-    await callback.message.answer(text)
+    await message.answer(text, reply_markup=change_settings_keyboard())
+
+
+@dp.callback_query(F.data == "menu:today")
+async def handle_today_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await send_weather_advice(callback.message, callback.from_user.id, "today")
+
+
+@dp.message(F.text == "Today", is_not_onboarding)
+async def handle_today_button(message: Message) -> None:
+    await send_weather_advice(message, message.from_user.id, "today")
+
+
+@dp.callback_query(F.data == "menu:tomorrow")
+async def handle_tomorrow_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await send_weather_advice(callback.message, callback.from_user.id, "tomorrow")
+
+
+@dp.message(F.text == "Tomorrow", is_not_onboarding)
+async def handle_tomorrow_button(message: Message) -> None:
+    await send_weather_advice(message, message.from_user.id, "tomorrow")
+
+
+@dp.callback_query(F.data == "menu:preferences")
+async def handle_preferences_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await send_settings(callback.message, callback.from_user.id)
+
+
+@dp.message(F.text == "Settings", is_not_onboarding)
+async def handle_settings_button(message: Message) -> None:
+    await send_settings(message, message.from_user.id)
+
+
+@dp.callback_query(F.data == "settings:change")
+async def handle_change_settings(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+    user_id = callback.from_user.id
+    username = callback.from_user.username
+    chat_id = callback.message.chat.id
+
+    try:
+        user = await asyncio.to_thread(upsert_user, user_id, username)
+        await asyncio.to_thread(delete_preferences, user["id"])
+    except psycopg.Error:
+        logging.exception("settings change failed telegram_id=%s", user_id)
+        await callback.message.answer("I could not change your settings. Please try again later.")
+        return
+
+    onboarding_sessions.pop(user_id, None)
+    await callback.message.answer("Let's change your settings.", reply_markup=ReplyKeyboardRemove())
+    await start_onboarding_for_user(chat_id, user_id, username)
+
 
 @dp.callback_query(F.data == "menu:quick_requests")
 async def handle_quick_requests_menu(callback: CallbackQuery) -> None:
     await callback.answer()
-    await callback.message.answer("Quick requests will be added soon.")
+    await callback.message.answer("You can ask simple weather questions soon.")
+
+
+@dp.message(F.text == "Ask", is_not_onboarding)
+async def handle_ask_button(message: Message) -> None:
+    await message.answer("You can ask simple weather questions soon.")
 
 
 @dp.message(
@@ -147,11 +199,11 @@ async def handle_other_messages(message: Message) -> None:
         saved_preferences = await asyncio.to_thread(get_saved_preferences, db_user["id"])
     except psycopg.Error:
         logging.exception("fallback user/preferences lookup failed telegram_id=%s", user.id)
-        await message.answer("I could not load your preferences. Please try again later.")
+        await message.answer("I could not load your settings. Please try again later.")
         return
 
     if saved_preferences:
-        await message.answer("Use the menu below, /start, or /reset.", reply_markup=main_menu_keyboard())
+        await message.answer("Use the menu below.", reply_markup=main_menu_keyboard())
         return
 
     await message.answer("Use /start to set up ANW.")

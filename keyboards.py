@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 
 def build_keyboard(buttons: list[tuple[str, str]]) -> InlineKeyboardMarkup:
@@ -11,13 +11,17 @@ def build_keyboard(buttons: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     )
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
     """Main menu after onboarding is complete."""
-    return build_keyboard(
-        [
-            ("Today advice", "menu:today"),
-            ("Tomorrow advice", "menu:tomorrow"),
-            ("Preferences", "menu:preferences"),
-            ("Quick Requests", "menu:quick_requests"),
-        ]
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Today"), KeyboardButton(text="Tomorrow")],
+            [KeyboardButton(text="Settings"), KeyboardButton(text="Ask")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
     )
+
+
+def change_settings_keyboard() -> InlineKeyboardMarkup:
+    return build_keyboard([("Change settings", "settings:change")])

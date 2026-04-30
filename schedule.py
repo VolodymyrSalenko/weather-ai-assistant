@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from aiogram import Bot
@@ -30,6 +30,19 @@ def location_label(location: dict[str, Any]) -> str:
     postal_code = location.get("postal_code") or "unknown postal code"
     city = location.get("city") or "unknown city"
     return f"{postal_code} {city}"
+
+
+def advice_header(context: dict[str, Any], day: str) -> str:
+    target_date = datetime.now(ZURICH_TZ).date()
+    label = "Today"
+
+    if day == "tomorrow":
+        target_date += timedelta(days=1)
+        label = "Tomorrow"
+
+    city = str(context.get("location") or "Your location").upper()
+    date_text = f"{target_date.strftime('%a')}, {target_date.day} {target_date.strftime('%b')}"
+    return f"{city}\n{label} · {date_text}"
 
 
 def time_minutes(value: Any) -> int | None:
@@ -138,7 +151,7 @@ async def send_scheduled_advice(
             day=day,
         )
         message = await asyncio.to_thread(generate_ai_advice, context)
-        await bot.send_message(telegram_id, message)
+        await bot.send_message(telegram_id, f"{advice_header(context, day)}\n\n{message}")
         print(f"Sent {notification_type} advice to telegram_id={telegram_id}")
     except Exception as error:
         print(f"Scheduled {notification_type} advice failed for telegram_id={telegram_id}: {error}")
