@@ -17,7 +17,7 @@ from database import (
     setup_database,
     upsert_user,
 )
-from keyboards import change_settings_keyboard, main_menu_keyboard
+from keyboards import ASK_QUESTIONS, ask_questions_keyboard, change_settings_keyboard, main_menu_keyboard
 from onboarding import onboarding_sessions
 from onboarding import router as onboarding_router
 from onboarding import set_bot, start_onboarding_for_user
@@ -174,12 +174,30 @@ async def handle_change_settings(callback: CallbackQuery) -> None:
 @dp.callback_query(F.data == "menu:quick_requests")
 async def handle_quick_requests_menu(callback: CallbackQuery) -> None:
     await callback.answer()
-    await callback.message.answer("You can ask simple weather questions soon.")
+    await callback.message.answer(
+        "Choose a question or write your own.",
+        reply_markup=ask_questions_keyboard(),
+    )
 
 
 @dp.message(F.text == "Ask", is_not_onboarding)
 async def handle_ask_button(message: Message) -> None:
-    await message.answer("You can ask simple weather questions soon.")
+    await message.answer(
+        "Choose a question or write your own.",
+        reply_markup=ask_questions_keyboard(),
+    )
+
+
+@dp.callback_query(F.data.startswith("ask:"))
+async def handle_ask_question(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+    try:
+        question = ASK_QUESTIONS[int((callback.data or "").split(":", maxsplit=1)[1])]
+    except (IndexError, ValueError):
+        return
+
+    await callback.message.answer(f"You selected: {question}")
 
 
 @dp.message(

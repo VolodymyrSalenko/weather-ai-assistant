@@ -10,7 +10,11 @@ from database import (
     cleanup_old_weather_forecasts,
     get_active_postal_code_locations,
     get_all_postal_code_locations,
+    get_completed_preferences_for_postal_code,
     get_completed_preferences_for_notifications,
+    get_latest_stored_weather_forecast,
+    has_notification_been_sent,
+    log_notification_sent,
     mark_notification_sent,
     setup_database,
 )
@@ -19,11 +23,13 @@ from weather import (
     fetch_and_store_weather_for_location,
     get_weather_for_user_from_db_or_fetch,
 )
+from weather_changes import detect_weather_changes
 
 
 ACTIVE_UPDATE_SECONDS = 2 * 60 * 60
 NOTIFICATION_CHECK_SECONDS = 60
 FULL_UPDATE_HOUR = 3
+WEATHER_CHANGE_NOTIFICATION_TYPE = "weather_change_today"
 
 
 def location_label(location: dict[str, Any]) -> str:
@@ -90,16 +96,106 @@ async def update_weather_for_locations(locations: list[dict[str, Any]]) -> None:
             print(f"Weather update failed for {location_label(location)}: {error}")
 
 
+async def send_weather_change_alerts(
+    bot: Bot,
+    location: dict[str, Any],
+    new_weather_json: dict[str, Any],
+    weather_changes: dict[str, Any],
+) -> None:
+    now = datetime.now(ZURICH_TZ)
+    preferences_rows = await asyncio.to_thread(
+        get_completed_preferences_for_postal_code,
+        int(location["id"]),
+    )
+
+    for preferences in preferences_rows:
+        if preferences.get("daytime_alerts") == "none":
+            continue
+
+        if is_quiet_time(preferences, now):
+            continue
+
+        already_sent = await asyncio.to_thread(
+            has_notification_been_sent,
+            int(preferences["user_id"]),
+            WEATHER_CHANGE_NOTIFICATION_TYPE,
+            now.date(),
+        )
+
+        if already_sent:
+            continue
+
+        context = build_weather_context(new_weather_json, preferences, location, day="today")
+        context["weather_changes"] = weather_changes
+
+        try:
+            message = await asyncio.to_thread(generate_ai_advice, context)
+        except Exception as error:
+            print(f"Weather change AI advice failed for {location_label(location)}: {error}")
+            continue
+
+        logged = await asyncio.to_thread(
+            log_notification_sent,
+            int(preferences["user_id"]),
+            WEATHER_CHANGE_NOTIFICATION_TYPE,
+            now.date(),
+        )
+
+        if not logged:
+            continue
+
+        try:
+            await bot.send_message(
+                int(preferences["telegram_id"]),
+                f"{advice_header(context, 'today')}\n\n{message}",
+            )
+            print(f"Sent weather change alert to telegram_id={preferences['telegram_id']}")
+        except Exception as error:
+            print(f"Weather change alert failed for telegram_id={preferences['telegram_id']}: {error}")
+
+
+async def update_active_weather_for_locations(locations: list[dict[str, Any]], bot: Bot | None = None) -> None:
+    for location in locations:
+        try:
+            old_weather_json = await asyncio.to_thread(
+                get_latest_stored_weather_forecast,
+                int(location["id"]),
+            )
+            forecast_id = await asyncio.to_thread(fetch_and_store_weather_for_location, location)
+            print(f"Updated weather for {location_label(location)} forecast_id={forecast_id}")
+
+            if old_weather_json is None:
+                print("No previous forecast to compare")
+                continue
+
+            new_weather_json = await asyncio.to_thread(
+                get_latest_stored_weather_forecast,
+                int(location["id"]),
+            )
+
+            if new_weather_json is None:
+                continue
+
+            result = detect_weather_changes(old_weather_json, new_weather_json, day="today")
+
+            if result["important_change"]:
+                print(f"Today changes for {location_label(location)}: {', '.join(result['changes'])}")
+                if bot is not None:
+                    await send_weather_change_alerts(bot, location, new_weather_json, result)
+        except Exception as error:
+            print(f"Weather update failed for {location_label(location)}: {error}")
+
+
 async def cleanup_weather_forecasts() -> None:
     print("Running weather forecast cleanup.")
     await asyncio.to_thread(cleanup_old_weather_forecasts, days=14)
 
 
-async def update_active_locations() -> None:
+async def update_active_locations(bot: Bot | None = None) -> None:
     print("Starting active weather update.")
     locations = await asyncio.to_thread(get_active_postal_code_locations)
     print(f"Found {len(locations)} active locations.")
-    await update_weather_for_locations(locations)
+    await update_active_weather_for_locations(locations, bot)
     await cleanup_weather_forecasts()
 
 
@@ -111,12 +207,12 @@ async def update_all_locations() -> None:
     await cleanup_weather_forecasts()
 
 
-async def active_locations_loop() -> None:
+async def active_locations_loop(bot: Bot) -> None:
     print("Active weather update interval is 2 hours.")
 
     while True:
         await asyncio.sleep(ACTIVE_UPDATE_SECONDS)
-        await update_active_locations()
+        await update_active_locations(bot)
 
 
 def next_full_update_time() -> datetime:
@@ -198,10 +294,10 @@ async def notification_loop(bot: Bot) -> None:
 async def main() -> None:
     await asyncio.to_thread(setup_database)
     bot = Bot(token=BOT_TOKEN)
-    await update_active_locations()
+    await update_active_locations(bot)
 
     try:
-        await asyncio.gather(active_locations_loop(), all_locations_loop(), notification_loop(bot))
+        await asyncio.gather(active_locations_loop(bot), all_locations_loop(), notification_loop(bot))
     finally:
         await bot.session.close()
 

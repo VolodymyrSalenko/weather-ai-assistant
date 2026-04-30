@@ -60,11 +60,22 @@ CREATE_NOTIFICATION_LOG_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS notification_log (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    notification_type TEXT CHECK (notification_type IN ('morning', 'evening')),
+    notification_type TEXT CHECK (notification_type IN ('morning', 'evening', 'weather_change_today')),
     notification_date DATE NOT NULL,
     sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (user_id, notification_type, notification_date)
 );
+"""
+
+DROP_NOTIFICATION_LOG_TYPE_CHECK_SQL = """
+ALTER TABLE notification_log
+DROP CONSTRAINT IF EXISTS notification_log_notification_type_check;
+"""
+
+ADD_NOTIFICATION_LOG_TYPE_CHECK_SQL = """
+ALTER TABLE notification_log
+ADD CONSTRAINT notification_log_notification_type_check
+CHECK (notification_type IN ('morning', 'evening', 'weather_change_today'));
 """
 
 POSTAL_CODE_QUERY = """
@@ -237,6 +248,38 @@ WHERE p.completed = TRUE
 ORDER BY p.updated_at DESC;
 """
 
+COMPLETED_PREFERENCES_FOR_POSTAL_CODE_SQL = """
+SELECT
+    p.id,
+    p.user_id,
+    p.postal_code_id,
+    pc.postal_code,
+    pc.city,
+    pc.canton,
+    pc.latitude,
+    pc.longitude,
+    p.morning_time::text,
+    p.evening_time::text,
+    p.quiet_hours_enabled,
+    p.quiet_hours_start::text,
+    p.quiet_hours_end::text,
+    p.cold_sensitivity,
+    p.heat_sensitivity,
+    p.bad_weather_sensitivity,
+    p.recommendation_style,
+    p.tone,
+    p.daytime_alerts,
+    p.completed,
+    p.created_at,
+    p.updated_at,
+    u.telegram_id
+FROM users u
+JOIN preferences p ON p.user_id = u.id
+JOIN postal_codes pc ON pc.id = p.postal_code_id
+WHERE p.completed = TRUE AND p.postal_code_id = %s
+ORDER BY p.updated_at DESC;
+"""
+
 CLEANUP_OLD_WEATHER_FORECASTS_SQL = """
 DELETE FROM weather_forecasts
 WHERE fetched_at < CURRENT_TIMESTAMP - (%s::int * INTERVAL '1 day');
@@ -249,6 +292,15 @@ ON CONFLICT (user_id, notification_type, notification_date) DO NOTHING
 RETURNING id;
 """
 
+HAS_NOTIFICATION_BEEN_SENT_SQL = """
+SELECT 1
+FROM notification_log
+WHERE user_id = %s
+    AND notification_type = %s
+    AND notification_date = %s
+LIMIT 1;
+"""
+
 
 def setup_database() -> None:
     """Create app tables if they do not exist."""
@@ -259,6 +311,8 @@ def setup_database() -> None:
             cursor.execute(CREATE_WEATHER_FORECASTS_TABLE_SQL)
             cursor.execute(CREATE_WEATHER_FORECASTS_INDEX_SQL)
             cursor.execute(CREATE_NOTIFICATION_LOG_TABLE_SQL)
+            cursor.execute(DROP_NOTIFICATION_LOG_TYPE_CHECK_SQL)
+            cursor.execute(ADD_NOTIFICATION_LOG_TYPE_CHECK_SQL)
 
 
 def row_to_user(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -423,6 +477,35 @@ def get_completed_preferences_for_notifications() -> list[dict[str, Any]]:
             rows = cursor.fetchall()
 
     return [row_to_notification_preferences(row) for row in rows]
+
+
+def get_completed_preferences_for_postal_code(postal_code_id: int) -> list[dict[str, Any]]:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(COMPLETED_PREFERENCES_FOR_POSTAL_CODE_SQL, (postal_code_id,))
+            rows = cursor.fetchall()
+
+    return [row_to_notification_preferences(row) for row in rows]
+
+
+def has_notification_been_sent(
+    user_id: int,
+    notification_type: str,
+    notification_date: date,
+) -> bool:
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                HAS_NOTIFICATION_BEEN_SENT_SQL,
+                (user_id, notification_type, notification_date),
+            )
+            row = cursor.fetchone()
+
+    return row is not None
+
+
+def log_notification_sent(user_id: int, notification_type: str, notification_date: date) -> bool:
+    return mark_notification_sent(user_id, notification_type, notification_date)
 
 
 def mark_notification_sent(user_id: int, notification_type: str, notification_date: date) -> bool:

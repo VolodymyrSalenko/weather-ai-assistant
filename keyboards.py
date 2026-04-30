@@ -25,3 +25,21 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
 
 def change_settings_keyboard() -> InlineKeyboardMarkup:
     return build_keyboard([("Change settings", "settings:change")])
+
+
+ASK_QUESTIONS = [
+    "What should I know about this weekend?",
+    "How is the weather in [city] on [day]?",
+    "Can I wear [clothes] on [day]?",
+    "What should I know about this week?",
+    "Is [activity] a good idea on [day]?",
+]
+
+
+def ask_questions_keyboard() -> InlineKeyboardMarkup:
+    return build_keyboard(
+        [
+            (question, f"ask:{index}")
+            for index, question in enumerate(ASK_QUESTIONS)
+        ]
+    )
