@@ -21,9 +21,9 @@ from weather import (
 )
 
 
-ACTIVE_UPDATE_SECONDS = 3 * 60 * 60
-ALL_UPDATE_SECONDS = 24 * 60 * 60
+ACTIVE_UPDATE_SECONDS = 2 * 60 * 60
 NOTIFICATION_CHECK_SECONDS = 60
+FULL_UPDATE_HOUR = 3
 
 
 def location_label(location: dict[str, Any]) -> str:
@@ -112,14 +112,28 @@ async def update_all_locations() -> None:
 
 
 async def active_locations_loop() -> None:
+    print("Active weather update interval is 2 hours.")
+
     while True:
         await asyncio.sleep(ACTIVE_UPDATE_SECONDS)
         await update_active_locations()
 
 
+def next_full_update_time() -> datetime:
+    now = datetime.now(ZURICH_TZ)
+    next_update = now.replace(hour=FULL_UPDATE_HOUR, minute=0, second=0, microsecond=0)
+
+    if next_update <= now:
+        next_update += timedelta(days=1)
+
+    return next_update
+
+
 async def all_locations_loop() -> None:
     while True:
-        await asyncio.sleep(ALL_UPDATE_SECONDS)
+        next_update = next_full_update_time()
+        print(f"Next full weather update: {next_update.strftime('%Y-%m-%d %H:%M %Z')}")
+        await asyncio.sleep((next_update - datetime.now(ZURICH_TZ)).total_seconds())
         await update_all_locations()
 
 
