@@ -29,19 +29,35 @@ def change_settings_keyboard() -> InlineKeyboardMarkup:
     return build_keyboard([("Change settings", "settings:change")])
 
 
-ASK_QUESTIONS = [
-    "What should I know about this weekend?",
-    "How is the weather in [city] on [day]?",
-    "Can I wear [clothes] on [day]?",
-    "What should I know about this week?",
-    "Is [activity] a good idea on [day]?",
-]
+def wizard_location_keyboard() -> InlineKeyboardMarkup:
+    return build_keyboard([
+        ("Use my saved location", "wiz:loc:saved"),
+        ("Other location", "wiz:loc:other"),
+    ])
 
 
-def ask_questions_keyboard() -> InlineKeyboardMarkup:
-    return build_keyboard(
+def wizard_day_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
         [
-            (question, f"ask:{index}")
-            for index, question in enumerate(ASK_QUESTIONS)
-        ]
-    )
+            InlineKeyboardButton(text="Today", callback_data="wiz:day:today"),
+            InlineKeyboardButton(text="Tomorrow", callback_data="wiz:day:tomorrow"),
+        ],
+        [
+            InlineKeyboardButton(text="This weekend", callback_data="wiz:day:weekend"),
+            InlineKeyboardButton(text="This week", callback_data="wiz:day:week"),
+        ],
+        [InlineKeyboardButton(text="Specific date", callback_data="wiz:day:specific")],
+    ])
+
+
+def wizard_category_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="What to wear", callback_data="wiz:cat:wear"),
+            InlineKeyboardButton(text="What to be aware of", callback_data="wiz:cat:aware"),
+        ],
+        [
+            InlineKeyboardButton(text="Outdoor activities", callback_data="wiz:cat:activities"),
+            InlineKeyboardButton(text="General overview", callback_data="wiz:cat:overview"),
+        ],
+    ])

@@ -22,7 +22,12 @@ from database import (
     setup_database,
     upsert_user,
 )
-from keyboards import ASK_QUESTIONS, ask_questions_keyboard, change_settings_keyboard
+from keyboards import (
+    change_settings_keyboard,
+    wizard_category_keyboard,
+    wizard_day_keyboard,
+    wizard_location_keyboard,
+)
 from onboarding import onboarding_sessions
 from onboarding import router as onboarding_router
 from onboarding import set_bot, start_onboarding_for_user
@@ -38,9 +43,21 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 user_states = {}
+ask_wizard_states: dict[int, dict] = {}
+_last_request: dict[int, datetime] = {}
+RATE_LIMIT_SECONDS = 10
 
 set_bot(bot)
 dp.include_router(onboarding_router)
+
+
+def is_rate_limited(telegram_id: int) -> bool:
+    now = datetime.now(ZURICH_TZ)
+    last = _last_request.get(telegram_id)
+    if last and now - last < timedelta(seconds=RATE_LIMIT_SECONDS):
+        return True
+    _last_request[telegram_id] = now
+    return False
 
 
 def is_not_onboarding(message: Message) -> bool:
@@ -133,6 +150,42 @@ def parse_day_reply(text: str) -> dict | None:
             return single_day_period("specific_date", target_date, target_date.strftime("%A"))
 
     return None
+
+
+def clear_wizard_state(user_id: int) -> None:
+    ask_wizard_states.pop(user_id, None)
+
+
+def category_to_question(category: str) -> str:
+    if category == "wear":
+        return "What should I wear?"
+    if category == "aware":
+        return "What should I be aware of?"
+    if category == "activities":
+        return "What outdoor activities are good?"
+    return "Give me a general weather overview."
+
+
+def category_label(category: str) -> str:
+    if category == "wear":
+        return "What to wear"
+    if category == "aware":
+        return "What to be aware of"
+    if category == "activities":
+        return "Outdoor activities"
+    return "General overview"
+
+
+def period_label_from_callback(day_key: str) -> str:
+    if day_key == "today":
+        return "Today"
+    if day_key == "tomorrow":
+        return "Tomorrow"
+    if day_key == "weekend":
+        return "This weekend"
+    if day_key == "week":
+        return "This week"
+    return "Specific date"
 
 
 def chat_answer_header(context: dict) -> str:
@@ -252,6 +305,10 @@ async def build_weather_advice_message(telegram_id: int, day: str) -> str:
 
 
 async def send_weather_advice(message: Message, telegram_id: int, day: str) -> None:
+    if is_rate_limited(telegram_id):
+        await message.answer("Please wait a few seconds before asking again.")
+        return
+
     try:
         advice = await build_weather_advice_message(telegram_id, day)
     except httpx.HTTPError:
@@ -267,6 +324,10 @@ async def send_weather_advice(message: Message, telegram_id: int, day: str) -> N
 
 
 async def answer_weather_question(message: Message, telegram_id: int, user_text: str) -> None:
+    if is_rate_limited(telegram_id):
+        await message.answer("Please wait a few seconds before asking again.")
+        return
+
     intent = await merge_pending_intent(telegram_id, user_text)
 
     if intent is None:
@@ -403,6 +464,7 @@ async def handle_today_menu(callback: CallbackQuery) -> None:
 
 @dp.message(F.text == "Today", is_not_onboarding)
 async def handle_today_button(message: Message) -> None:
+    clear_wizard_state(message.from_user.id)
     await send_weather_advice(message, message.from_user.id, "today")
 
 
@@ -414,6 +476,7 @@ async def handle_tomorrow_menu(callback: CallbackQuery) -> None:
 
 @dp.message(F.text == "Tomorrow", is_not_onboarding)
 async def handle_tomorrow_button(message: Message) -> None:
+    clear_wizard_state(message.from_user.id)
     await send_weather_advice(message, message.from_user.id, "tomorrow")
 
 
@@ -425,6 +488,7 @@ async def handle_preferences_menu(callback: CallbackQuery) -> None:
 
 @dp.message(F.text == "Settings", is_not_onboarding)
 async def handle_settings_button(message: Message) -> None:
+    clear_wizard_state(message.from_user.id)
     await send_settings(message, message.from_user.id)
 
 
@@ -449,33 +513,153 @@ async def handle_change_settings(callback: CallbackQuery) -> None:
     await start_onboarding_for_user(chat_id, user_id, username)
 
 
-@dp.callback_query(F.data == "menu:quick_requests")
-async def handle_quick_requests_menu(callback: CallbackQuery) -> None:
-    await callback.answer()
-    await callback.message.answer(
-        "Choose a question or write your own.",
-        reply_markup=ask_questions_keyboard(),
-    )
-
-
 @dp.message(F.text == "Ask", is_not_onboarding)
 async def handle_ask_button(message: Message) -> None:
-    await message.answer(
-        "Choose a question or write your own.",
-        reply_markup=ask_questions_keyboard(),
+    user_id = message.from_user.id
+    clear_wizard_state(user_id)
+    user_states.pop(user_id, None)
+    sent = await message.answer(
+        "Where do you want to know about?",
+        reply_markup=wizard_location_keyboard(),
+    )
+    ask_wizard_states[user_id] = {
+        "step": "location",
+        "location": None,
+        "period": None,
+        "category": None,
+        "message_id": sent.message_id,
+        "chat_id": sent.chat.id,
+    }
+
+
+@dp.callback_query(F.data == "wiz:loc:saved")
+async def handle_wiz_loc_saved(callback: CallbackQuery) -> None:
+    await callback.answer()
+    user_id = callback.from_user.id
+    state = ask_wizard_states.get(user_id)
+    if not state or state.get("step") != "location":
+        return
+    try:
+        preferences = await asyncio.to_thread(get_location_preferences_for_telegram_id, user_id)
+    except psycopg.Error:
+        logging.exception("wizard saved location lookup failed telegram_id=%s", user_id)
+        await callback.message.edit_text("I could not load your settings. Please try again later.")
+        clear_wizard_state(user_id)
+        return
+    if not preferences:
+        await callback.message.edit_text("Use /start to set up ANW.")
+        clear_wizard_state(user_id)
+        return
+    location = saved_location_from_preferences(preferences)
+    state["location"] = location
+    state["step"] = "day"
+    city = (location.get("city") or "your location").upper()
+    await callback.message.edit_text(
+        f"Location: {city}\n\nWhen?",
+        reply_markup=wizard_day_keyboard(),
     )
 
 
-@dp.callback_query(F.data.startswith("ask:"))
-async def handle_ask_question(callback: CallbackQuery) -> None:
+@dp.callback_query(F.data == "wiz:loc:other")
+async def handle_wiz_loc_other(callback: CallbackQuery) -> None:
     await callback.answer()
-
-    try:
-        question = ASK_QUESTIONS[int((callback.data or "").split(":", maxsplit=1)[1])]
-    except (IndexError, ValueError):
+    user_id = callback.from_user.id
+    state = ask_wizard_states.get(user_id)
+    if not state or state.get("step") != "location":
         return
+    state["step"] = "custom_location"
+    await callback.message.edit_text("Type a Swiss city name or 4-digit postal code.")
 
-    await answer_weather_question(callback.message, callback.from_user.id, question)
+
+@dp.callback_query(F.data.startswith("wiz:day:"))
+async def handle_wiz_day(callback: CallbackQuery) -> None:
+    await callback.answer()
+    user_id = callback.from_user.id
+    state = ask_wizard_states.get(user_id)
+    if not state or state.get("step") != "day":
+        return
+    day_key = (callback.data or "").split(":", 2)[2]
+    if day_key == "specific":
+        state["step"] = "custom_date"
+        await callback.message.edit_text(
+            "Type a date (e.g. 2026-05-03) or a weekday name (e.g. Monday)."
+        )
+        return
+    period = parse_day_reply(period_label_from_callback(day_key).lower())
+    if period is None:
+        await callback.message.edit_text("Something went wrong. Try Ask again.")
+        clear_wizard_state(user_id)
+        return
+    state["period"] = period
+    state["step"] = "category"
+    location = state.get("location") or {}
+    city = (location.get("city") or "your location").upper()
+    await callback.message.edit_text(
+        f"Location: {city}\nWhen: {period.get('label')}\n\nWhat do you want to know?",
+        reply_markup=wizard_category_keyboard(),
+    )
+
+
+@dp.callback_query(F.data.startswith("wiz:cat:"))
+async def handle_wiz_category(callback: CallbackQuery) -> None:
+    await callback.answer()
+    user_id = callback.from_user.id
+    state = ask_wizard_states.get(user_id)
+    if not state or state.get("step") != "category":
+        return
+    category = (callback.data or "").split(":", 2)[2]
+    state["category"] = category
+    await callback.message.edit_text(
+        "Location: {city}\nWhen: {when}\nWhat: {what}".format(
+            city=(state.get("location") or {}).get("city", "your location").upper(),
+            when=(state.get("period") or {}).get("label", ""),
+            what=category_label(category),
+        )
+    )
+    await finish_wizard(callback.message, user_id)
+
+
+async def finish_wizard(message: Message, user_id: int) -> None:
+    state = ask_wizard_states.get(user_id)
+    if not state:
+        return
+    location = state.get("location")
+    period = state.get("period")
+    category = state.get("category")
+    clear_wizard_state(user_id)
+    if not location or not period or not category:
+        await message.answer("Something went wrong. Try Ask again.")
+        return
+    try:
+        preferences = await asyncio.to_thread(get_location_preferences_for_telegram_id, user_id)
+    except psycopg.Error:
+        logging.exception("wizard preferences failed telegram_id=%s", user_id)
+        await message.answer("I could not load your settings. Please try again later.")
+        return
+    if preferences is None:
+        await message.answer("Use /start to set up ANW.")
+        return
+    try:
+        weather_json = await load_weather_for_location(location)
+    except (psycopg.Error, RuntimeError):
+        logging.exception("wizard forecast failed telegram_id=%s", user_id)
+        await message.answer("I could not load the weather right now. Please try again later.")
+        return
+    context = build_weather_period_context(weather_json, preferences, location, period)
+    user_question = category_to_question(category)
+    context["user_question"] = user_question
+    context["question_type"] = category
+    try:
+        answer = await asyncio.to_thread(generate_weather_chat_answer, user_question, context)
+    except httpx.HTTPError:
+        logging.exception("wizard answer failed telegram_id=%s", user_id)
+        await message.answer("I could not answer that right now. Please try again later.")
+        return
+    except RuntimeError:
+        logging.exception("wizard setup failed telegram_id=%s", user_id)
+        await message.answer("I could not answer that right now. Please try again later.")
+        return
+    await message.answer(f"{chat_answer_header(context)}\n\n{answer}")
 
 
 @dp.message(
@@ -489,6 +673,43 @@ async def handle_other_messages(message: Message) -> None:
 
     if user is None:
         return
+
+    wizard_state = ask_wizard_states.get(user.id)
+    if wizard_state:
+        step = wizard_state.get("step")
+        if step == "custom_location":
+            location = await asyncio.to_thread(
+                find_postal_code_location, (message.text or "").strip()
+            )
+            if location is None:
+                await message.answer(
+                    "I couldn't find that place. Try a Swiss city name or a 4-digit postal code."
+                )
+                return
+            wizard_state["location"] = location
+            wizard_state["step"] = "day"
+            city = (location.get("city") or "your location").upper()
+            await message.answer(
+                f"Location: {city}\n\nWhen?",
+                reply_markup=wizard_day_keyboard(),
+            )
+            return
+        if step == "custom_date":
+            period = parse_day_reply(message.text or "")
+            if period is None:
+                await message.answer(
+                    "I didn't catch the date. Try a date like 2026-05-03 or a weekday name."
+                )
+                return
+            wizard_state["period"] = period
+            wizard_state["step"] = "category"
+            location = wizard_state.get("location") or {}
+            city = (location.get("city") or "your location").upper()
+            await message.answer(
+                f"Location: {city}\nWhen: {period.get('label')}\n\nWhat do you want to know?",
+                reply_markup=wizard_category_keyboard(),
+            )
+            return
 
     try:
         db_user = await asyncio.to_thread(upsert_user, user.id, user.username)

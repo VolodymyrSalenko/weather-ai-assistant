@@ -12,6 +12,22 @@ from database import (
     save_weather_forecast,
 )
 
+# Temperature thresholds in °C — keyed by user sensitivity setting
+COLD_THRESHOLD = {"high": 14, "medium": 10, "low": 6}
+HEAT_THRESHOLD = {"high": 24, "medium": 28, "low": 32}
+
+# Rain probability thresholds in % — keyed by user sensitivity setting
+RAIN_THRESHOLD = {"high": 30, "medium": 50, "low": 70}
+
+# Wind speed threshold in km/h above which conditions are considered windy
+WIND_ALERT_KMH = 40
+
+# Ideal outdoor temperature in °C used for activity scoring
+IDEAL_OUTDOOR_TEMP_C = 18
+
+# Outdoor activity score above this value is considered "not recommended"
+OUTDOOR_SCORE_LIMIT = 85
+
 
 def get_open_meteo_forecast(latitude: float, longitude: float, forecast_days: int = 7) -> dict[str, Any]:
     """Fetch raw weather data from Open-Meteo."""
@@ -219,7 +235,7 @@ def best_outdoor_time(rows: list[dict[str, Any]]) -> str:
         )
         wind_score = average_number([row.get("wind_gusts_10m") for row in period_rows])
         snow_score = max_number([row.get("snowfall") for row in period_rows]) * 50
-        comfort_penalty = abs(temperature - 18) * 2
+        comfort_penalty = abs(temperature - IDEAL_OUTDOOR_TEMP_C) * 2
 
         total_score = precipitation_score + comfort_penalty + wind_score * 0.5 + snow_score
         scores.append((total_score, name))
@@ -229,7 +245,7 @@ def best_outdoor_time(rows: list[dict[str, Any]]) -> str:
 
     score, name = min(scores)
 
-    if score >= 85:
+    if score >= OUTDOOR_SCORE_LIMIT:
         return "not recommended"
 
     return name
@@ -249,13 +265,9 @@ def build_weather_context(
     if not apparent_values and day == "today":
         apparent_values = [current.get("apparent_temperature")]
 
-    cold_thresholds = {"high": 14, "medium": 10, "low": 6}
-    heat_thresholds = {"high": 24, "medium": 28, "low": 32}
-    rain_thresholds = {"high": 30, "medium": 50, "low": 70}
-
-    cold_threshold = cold_thresholds.get(preferences.get("cold_sensitivity"), 10)
-    heat_threshold = heat_thresholds.get(preferences.get("heat_sensitivity"), 28)
-    rain_threshold = rain_thresholds.get(preferences.get("bad_weather_sensitivity"), 50)
+    cold_threshold = COLD_THRESHOLD.get(preferences.get("cold_sensitivity"), 10)
+    heat_threshold = HEAT_THRESHOLD.get(preferences.get("heat_sensitivity"), 28)
+    rain_threshold = RAIN_THRESHOLD.get(preferences.get("bad_weather_sensitivity"), 50)
 
     clean_apparent_values = [
         value for value in (number_or_none(value) for value in apparent_values)
@@ -278,7 +290,7 @@ def build_weather_context(
     feels_hot = max_apparent is not None and max_apparent >= heat_threshold
     rain_expected = max_precipitation_probability >= rain_threshold
     snow_expected = max_snowfall > 0
-    windy = max_wind_gusts >= 40
+    windy = max_wind_gusts >= WIND_ALERT_KMH
 
     return {
         "day": day,

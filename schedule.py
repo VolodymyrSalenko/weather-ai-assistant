@@ -1,6 +1,7 @@
 """Run background weather refreshes, scheduled advice messages, and weather change alerts."""
 
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -27,6 +28,8 @@ from weather import (
 )
 from weather_changes import detect_weather_changes
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
 ACTIVE_UPDATE_SECONDS = 2 * 60 * 60
 NOTIFICATION_CHECK_SECONDS = 60
@@ -93,9 +96,9 @@ async def update_weather_for_locations(locations: list[dict[str, Any]]) -> None:
     for location in locations:
         try:
             forecast_id = await asyncio.to_thread(fetch_and_store_weather_for_location, location)
-            print(f"Updated weather for {location_label(location)} forecast_id={forecast_id}")
-        except Exception as error:
-            print(f"Weather update failed for {location_label(location)}: {error}")
+            logger.info("Updated weather for %s forecast_id=%s", location_label(location), forecast_id)
+        except Exception:
+            logger.exception("Weather update failed for %s", location_label(location))
 
 
 async def send_weather_change_alerts(
@@ -132,8 +135,8 @@ async def send_weather_change_alerts(
 
         try:
             message = await asyncio.to_thread(generate_ai_advice, context)
-        except Exception as error:
-            print(f"Weather change AI advice failed for {location_label(location)}: {error}")
+        except Exception:
+            logger.exception("Weather change AI advice failed for %s", location_label(location))
             continue
 
         logged = await asyncio.to_thread(
@@ -151,9 +154,9 @@ async def send_weather_change_alerts(
                 int(preferences["telegram_id"]),
                 f"{advice_header(context, 'today')}\n\n{message}",
             )
-            print(f"Sent weather change alert to telegram_id={preferences['telegram_id']}")
-        except Exception as error:
-            print(f"Weather change alert failed for telegram_id={preferences['telegram_id']}: {error}")
+            logger.info("Sent weather change alert to telegram_id=%s", preferences["telegram_id"])
+        except Exception:
+            logger.exception("Weather change alert failed for telegram_id=%s", preferences["telegram_id"])
 
 
 async def update_active_weather_for_locations(locations: list[dict[str, Any]], bot: Bot | None = None) -> None:
@@ -164,10 +167,10 @@ async def update_active_weather_for_locations(locations: list[dict[str, Any]], b
                 int(location["id"]),
             )
             forecast_id = await asyncio.to_thread(fetch_and_store_weather_for_location, location)
-            print(f"Updated weather for {location_label(location)} forecast_id={forecast_id}")
+            logger.info("Updated weather for %s forecast_id=%s", location_label(location), forecast_id)
 
             if old_weather_json is None:
-                print("No previous forecast to compare")
+                logger.info("No previous forecast to compare for %s", location_label(location))
                 continue
 
             new_weather_json = await asyncio.to_thread(
@@ -181,36 +184,36 @@ async def update_active_weather_for_locations(locations: list[dict[str, Any]], b
             result = detect_weather_changes(old_weather_json, new_weather_json, day="today")
 
             if result["important_change"]:
-                print(f"Today changes for {location_label(location)}: {', '.join(result['changes'])}")
+                logger.info("Today changes for %s: %s", location_label(location), ", ".join(result["changes"]))
                 if bot is not None:
                     await send_weather_change_alerts(bot, location, new_weather_json, result)
-        except Exception as error:
-            print(f"Weather update failed for {location_label(location)}: {error}")
+        except Exception:
+            logger.exception("Weather update failed for %s", location_label(location))
 
 
 async def cleanup_weather_forecasts() -> None:
-    print("Running weather forecast cleanup.")
+    logger.info("Running weather forecast cleanup.")
     await asyncio.to_thread(cleanup_old_weather_forecasts, days=14)
 
 
 async def update_active_locations(bot: Bot | None = None) -> None:
-    print("Starting active weather update.")
+    logger.info("Starting active weather update.")
     locations = await asyncio.to_thread(get_active_postal_code_locations)
-    print(f"Found {len(locations)} active locations.")
+    logger.info("Found %s active locations.", len(locations))
     await update_active_weather_for_locations(locations, bot)
     await cleanup_weather_forecasts()
 
 
 async def update_all_locations() -> None:
-    print("Starting full daily weather update.")
+    logger.info("Starting full daily weather update.")
     locations = await asyncio.to_thread(get_all_postal_code_locations)
-    print(f"Found {len(locations)} postal code locations.")
+    logger.info("Found %s postal code locations.", len(locations))
     await update_weather_for_locations(locations)
     await cleanup_weather_forecasts()
 
 
 async def active_locations_loop(bot: Bot) -> None:
-    print("Active weather update interval is 2 hours.")
+    logger.info("Active weather update interval is 2 hours.")
 
     while True:
         await asyncio.sleep(ACTIVE_UPDATE_SECONDS)
@@ -230,7 +233,7 @@ def next_full_update_time() -> datetime:
 async def all_locations_loop() -> None:
     while True:
         next_update = next_full_update_time()
-        print(f"Next full weather update: {next_update.strftime('%Y-%m-%d %H:%M %Z')}")
+        logger.info("Next full weather update: %s", next_update.strftime("%Y-%m-%d %H:%M %Z"))
         await asyncio.sleep((next_update - datetime.now(ZURICH_TZ)).total_seconds())
         await update_all_locations()
 
@@ -264,9 +267,9 @@ async def send_scheduled_advice(
         )
         message = await asyncio.to_thread(generate_ai_advice, context)
         await bot.send_message(telegram_id, f"{advice_header(context, day)}\n\n{message}")
-        print(f"Sent {notification_type} advice to telegram_id={telegram_id}")
-    except Exception as error:
-        print(f"Scheduled {notification_type} advice failed for telegram_id={telegram_id}: {error}")
+        logger.info("Sent %s advice to telegram_id=%s", notification_type, telegram_id)
+    except Exception:
+        logger.exception("Scheduled %s advice failed for telegram_id=%s", notification_type, telegram_id)
 
 
 async def check_scheduled_notifications(bot: Bot) -> None:
@@ -288,8 +291,8 @@ async def notification_loop(bot: Bot) -> None:
     while True:
         try:
             await check_scheduled_notifications(bot)
-        except Exception as error:
-            print(f"Scheduled notification check failed: {error}")
+        except Exception:
+            logger.exception("Scheduled notification check failed")
         await asyncio.sleep(NOTIFICATION_CHECK_SECONDS)
 
 
