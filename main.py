@@ -42,8 +42,10 @@ logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-user_states = {}
 ask_wizard_states: dict[int, dict] = {}
+user_message_history: dict[int, list[dict]] = {}
+HISTORY_MAX_MESSAGES = 6
+HISTORY_MESSAGE_MAX_LENGTH = 300
 _last_request: dict[int, datetime] = {}
 RATE_LIMIT_SECONDS = 10
 
@@ -156,6 +158,32 @@ def clear_wizard_state(user_id: int) -> None:
     ask_wizard_states.pop(user_id, None)
 
 
+def add_to_history(user_id: int, role: str, content: str) -> None:
+    if not content:
+        return
+    truncated = content[:HISTORY_MESSAGE_MAX_LENGTH]
+    history = user_message_history.setdefault(user_id, [])
+    history.append({"role": role, "content": truncated})
+    if len(history) > HISTORY_MAX_MESSAGES:
+        del history[: len(history) - HISTORY_MAX_MESSAGES]
+
+
+def get_history_context(user_id: int) -> str:
+    history = user_message_history.get(user_id) or []
+    if len(history) <= 1:
+        return ""
+    previous = history[:-1]
+    lines = []
+    for msg in previous:
+        label = "User" if msg["role"] == "user" else "Bot"
+        lines.append(f"{label}: {msg['content']}")
+    return "\n".join(lines)
+
+
+def clear_history(user_id: int) -> None:
+    user_message_history.pop(user_id, None)
+
+
 def category_to_question(category: str) -> str:
     if category == "wear":
         return "What should I wear?"
@@ -198,72 +226,6 @@ def chat_answer_header(context: dict) -> str:
         return f"{city}\n{label} · {short_date(start_date)}"
 
     return f"{city}\n{label} · {short_date(start_date)} - {short_date(end_date)}"
-
-
-def missing_field_from_intent(intent: dict) -> str | None:
-    question = str(intent.get("clarifying_question") or "").lower()
-
-    if (intent.get("time_period") or {}).get("type") == "unknown":
-        return "day"
-
-    if any(word in question for word in ("city", "location", "where", "postal code")):
-        return "location"
-
-    if any(word in question for word in ("day", "date", "when")):
-        return "day"
-
-    if not intent.get("location") and not intent.get("use_saved_location"):
-        return "location"
-
-    return None
-
-
-async def merge_pending_intent(user_id: int, user_text: str) -> dict | None:
-    state = user_states.get(user_id)
-
-    if not state or not state.get("waiting_for"):
-        return None
-
-    waiting_for = state["waiting_for"]
-    intent = dict(state["pending_intent"])
-
-    if waiting_for == "location":
-        location = await asyncio.to_thread(find_postal_code_location, user_text.strip())
-
-        if location is None:
-            user_states.pop(user_id, None)
-            return None
-
-        intent["location"] = user_text.strip()
-        intent["use_saved_location"] = False
-        intent["cleaned_question"] = str(intent.get("cleaned_question") or "").replace("[city]", user_text.strip())
-
-    elif waiting_for == "day":
-        period = parse_day_reply(user_text)
-
-        if period is None:
-            user_states.pop(user_id, None)
-            return None
-
-        intent["time_period"] = period
-        intent["cleaned_question"] = str(intent.get("cleaned_question") or "").replace("[day]", user_text.strip())
-
-    else:
-        user_states.pop(user_id, None)
-        return None
-
-    if (intent.get("time_period") or {}).get("type") == "unknown":
-        intent["needs_clarification"] = True
-        intent["clarifying_question"] = "Which day should I check?"
-    elif not intent.get("location") and not intent.get("use_saved_location"):
-        intent["needs_clarification"] = True
-        intent["clarifying_question"] = "Which city should I check?"
-    else:
-        intent["needs_clarification"] = False
-        intent["clarifying_question"] = None
-
-    user_states.pop(user_id, None)
-    return intent
 
 
 def saved_location_from_preferences(preferences: dict) -> dict:
@@ -328,41 +290,35 @@ async def answer_weather_question(message: Message, telegram_id: int, user_text:
         await message.answer("Please wait a few seconds before asking again.")
         return
 
-    intent = await merge_pending_intent(telegram_id, user_text)
+    history_context = get_history_context(telegram_id)
 
-    if intent is None:
-        try:
-            intent = await asyncio.to_thread(understand_weather_question, user_text)
-        except httpx.HTTPError:
-            logging.exception("weather question intent failed telegram_id=%s", telegram_id)
-            await message.answer("I could not understand that right now. Please try again later.")
-            return
-        except (RuntimeError, ValueError):
-            logging.exception("weather question setup failed telegram_id=%s", telegram_id)
-            await message.answer("I could not answer that right now. Please try again later.")
-            return
+    try:
+        intent = await asyncio.to_thread(
+            understand_weather_question, user_text, history_context
+        )
+    except httpx.HTTPError:
+        logging.exception("weather question intent failed telegram_id=%s", telegram_id)
+        await message.answer("I could not understand that right now. Please try again later.")
+        return
+    except (RuntimeError, ValueError):
+        logging.exception("weather question setup failed telegram_id=%s", telegram_id)
+        await message.answer("I could not answer that right now. Please try again later.")
+        return
 
     if not intent.get("is_weather_related"):
-        user_states.pop(telegram_id, None)
         await message.answer(intent.get("reply") or NON_WEATHER_REPLY)
         return
 
     if intent.get("needs_clarification"):
-        waiting_for = missing_field_from_intent(intent)
-
-        if waiting_for and intent.get("clarifying_question"):
-            user_states[telegram_id] = {
-                "pending_intent": intent,
-                "waiting_for": waiting_for,
-            }
-
-        await message.answer(intent.get("clarifying_question") or "Can you tell me a little more?")
+        clarifying_question = intent.get("clarifying_question") or "Can you tell me a little more?"
+        add_to_history(telegram_id, "assistant", clarifying_question)
+        await message.answer(clarifying_question)
         return
 
-    user_states.pop(telegram_id, None)
-
     try:
-        preferences = await asyncio.to_thread(get_location_preferences_for_telegram_id, telegram_id)
+        preferences = await asyncio.to_thread(
+            get_location_preferences_for_telegram_id, telegram_id
+        )
     except psycopg.Error:
         logging.exception("weather question preferences failed telegram_id=%s", telegram_id)
         await message.answer("I could not load your settings. Please try again later.")
@@ -374,7 +330,6 @@ async def answer_weather_question(message: Message, telegram_id: int, user_text:
 
     if intent.get("location"):
         location = await asyncio.to_thread(find_postal_code_location, str(intent["location"]))
-
         if location is None:
             await message.answer("I could not find that place. Try another Swiss city or postal code.")
             return
@@ -389,10 +344,7 @@ async def answer_weather_question(message: Message, telegram_id: int, user_text:
         return
 
     context = build_weather_period_context(
-        weather_json,
-        preferences,
-        location,
-        intent.get("time_period") or {},
+        weather_json, preferences, location, intent.get("time_period") or {},
     )
     context["user_question"] = intent.get("cleaned_question") or user_text
     context["question_type"] = intent.get("question_type")
@@ -412,7 +364,9 @@ async def answer_weather_question(message: Message, telegram_id: int, user_text:
         await message.answer("I could not answer that right now. Please try again later.")
         return
 
-    await message.answer(f"{chat_answer_header(context)}\n\n{answer}")
+    full_message = f"{chat_answer_header(context)}\n\n{answer}"
+    add_to_history(telegram_id, "assistant", answer)
+    await message.answer(full_message)
 
 
 async def send_settings(message: Message, telegram_id: int) -> None:
@@ -509,6 +463,7 @@ async def handle_change_settings(callback: CallbackQuery) -> None:
         return
 
     onboarding_sessions.pop(user_id, None)
+    clear_history(user_id)
     await callback.message.answer("Let's change your settings.", reply_markup=ReplyKeyboardRemove())
     await start_onboarding_for_user(chat_id, user_id, username)
 
@@ -517,7 +472,6 @@ async def handle_change_settings(callback: CallbackQuery) -> None:
 async def handle_ask_button(message: Message) -> None:
     user_id = message.from_user.id
     clear_wizard_state(user_id)
-    user_states.pop(user_id, None)
     sent = await message.answer(
         "Where do you want to know about?",
         reply_markup=wizard_location_keyboard(),
@@ -659,6 +613,7 @@ async def finish_wizard(message: Message, user_id: int) -> None:
         logging.exception("wizard setup failed telegram_id=%s", user_id)
         await message.answer("I could not answer that right now. Please try again later.")
         return
+    add_to_history(user_id, "assistant", answer)
     await message.answer(f"{chat_answer_header(context)}\n\n{answer}")
 
 
@@ -710,6 +665,8 @@ async def handle_other_messages(message: Message) -> None:
                 reply_markup=wizard_category_keyboard(),
             )
             return
+
+    add_to_history(user.id, "user", message.text or "")
 
     try:
         db_user = await asyncio.to_thread(upsert_user, user.id, user.username)
