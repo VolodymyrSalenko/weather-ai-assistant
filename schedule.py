@@ -36,6 +36,10 @@ NOTIFICATION_CHECK_SECONDS = 60
 FULL_UPDATE_HOUR = 3
 WEATHER_CHANGE_NOTIFICATION_TYPE = "weather_change_today"
 
+# In-memory cooldown for "all" users: user_id → last alert datetime
+_last_change_alert: dict[int, datetime] = {}
+CHANGE_ALERT_COOLDOWN_SECONDS = 2 * 60 * 60  # 2 hours
+
 
 def location_label(location: dict[str, Any]) -> str:
     postal_code = location.get("postal_code") or "unknown postal code"
@@ -92,6 +96,17 @@ def is_quiet_time(preferences: dict[str, Any], now: datetime) -> bool:
     return current >= start or current < end
 
 
+def is_change_alert_on_cooldown(user_id: int, now: datetime) -> bool:
+    last = _last_change_alert.get(user_id)
+    if last is None:
+        return False
+    return (now - last).total_seconds() < CHANGE_ALERT_COOLDOWN_SECONDS
+
+
+def record_change_alert_sent(user_id: int, now: datetime) -> None:
+    _last_change_alert[user_id] = now
+
+
 async def update_weather_for_locations(locations: list[dict[str, Any]]) -> None:
     for location in locations:
         try:
@@ -115,28 +130,15 @@ async def send_weather_change_alerts(
     )
 
     for preferences in preferences_rows:
-        if preferences.get("daytime_alerts") == "none":
-            continue
-
         daytime_alerts = preferences.get("daytime_alerts") or "important"
 
-        # "important" users only get snow, wind, temperature changes.
-        # "all" users also get rain changes.
-        if daytime_alerts == "important" and not weather_changes.get("has_important_changes"):
+        if daytime_alerts == "none":
             continue
 
         if is_quiet_time(preferences, now):
             continue
 
-        already_sent = await asyncio.to_thread(
-            has_notification_been_sent,
-            int(preferences["user_id"]),
-            WEATHER_CHANGE_NOTIFICATION_TYPE,
-            now.date(),
-        )
-
-        if already_sent:
-            continue
+        user_id = int(preferences["user_id"])
 
         user_sensitivity = preferences.get("bad_weather_sensitivity") or "medium"
         user_result = detect_weather_changes(
@@ -146,36 +148,71 @@ async def send_weather_change_alerts(
             bad_weather_sensitivity=user_sensitivity,
         )
 
-        if not user_result["important_change"]:
+        has_negative = bool(user_result["important_changes"] or user_result["regular_changes"])
+        has_positive = user_result.get("has_positive_changes", False)
+
+        if not has_negative and not has_positive:
             continue
 
+        # "important" users: only negative important changes, once per day
+        if daytime_alerts == "important":
+            if not user_result["has_important_changes"]:
+                continue
+            already_sent = await asyncio.to_thread(
+                has_notification_been_sent,
+                user_id,
+                WEATHER_CHANGE_NOTIFICATION_TYPE,
+                now.date(),
+            )
+            if already_sent:
+                continue
+
+        # "all" users: negative + positive, cooldown 2 hours
+        if daytime_alerts == "all":
+            if is_change_alert_on_cooldown(user_id, now):
+                continue
+
         context = build_weather_context(new_weather_json, preferences, location, day="today")
+
+        if has_negative:
+            context["change_type"] = "negative"
+        else:
+            context["change_type"] = "positive"
+
         context["weather_changes"] = user_result
 
         try:
             message = await asyncio.to_thread(generate_ai_advice, context)
         except Exception:
-            logger.exception("Weather change AI advice failed for %s", location_label(location))
+            logger.exception(
+                "Weather change AI advice failed for %s", location_label(location)
+            )
             continue
 
-        logged = await asyncio.to_thread(
-            log_notification_sent,
-            int(preferences["user_id"]),
-            WEATHER_CHANGE_NOTIFICATION_TYPE,
-            now.date(),
-        )
-
-        if not logged:
-            continue
+        if daytime_alerts == "important":
+            await asyncio.to_thread(
+                log_notification_sent,
+                user_id,
+                WEATHER_CHANGE_NOTIFICATION_TYPE,
+                now.date(),
+            )
+        else:
+            record_change_alert_sent(user_id, now)
 
         try:
             await bot.send_message(
                 int(preferences["telegram_id"]),
                 f"{advice_header(context, 'today')}\n\n{message}",
             )
-            logger.info("Sent weather change alert to telegram_id=%s", preferences["telegram_id"])
+            logger.info(
+                "Sent weather change alert to telegram_id=%s change_type=%s",
+                preferences["telegram_id"],
+                context["change_type"],
+            )
         except Exception:
-            logger.exception("Weather change alert failed for telegram_id=%s", preferences["telegram_id"])
+            logger.exception(
+                "Weather change alert failed for telegram_id=%s", preferences["telegram_id"]
+            )
 
 
 async def update_active_weather_for_locations(locations: list[dict[str, Any]], bot: Bot | None = None) -> None:

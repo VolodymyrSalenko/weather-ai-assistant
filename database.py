@@ -92,11 +92,11 @@ SELECT id, postal_code, city, canton, latitude, longitude
 FROM postal_codes
 WHERE
     (%s = TRUE AND postal_code = %s)
-    OR (%s = FALSE AND city ILIKE %s)
+    OR (%s = FALSE AND unaccent(lower(city)) ILIKE unaccent(lower(%s)))
 ORDER BY
     CASE
-        WHEN lower(city) = lower(%s) THEN 0
-        WHEN city ILIKE %s THEN 1
+        WHEN unaccent(lower(city)) = unaccent(lower(%s)) THEN 0
+        WHEN unaccent(lower(city)) ILIKE unaccent(lower(%s)) THEN 1
         ELSE 2
     END,
     city,

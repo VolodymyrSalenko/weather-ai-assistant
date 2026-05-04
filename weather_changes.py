@@ -67,12 +67,46 @@ def detect_weather_changes(
         else:
             important_changes.append(change)
 
+    # Positive changes — weather improving
+    positive_changes = []
+
+    rain_stopped_threshold = rain_threshold
+    if (
+        old_facts["max_precipitation_probability"] >= rain_stopped_threshold
+        and new_facts["max_precipitation_probability"] < rain_stopped_threshold
+    ):
+        positive_changes.append("Rain has stopped.")
+
+    old_temp = old_facts["max_apparent_temperature"]
+    new_temp = new_facts["max_apparent_temperature"]
+    if (
+        old_temp is not None
+        and new_temp is not None
+        and not (14 <= old_temp <= 24)
+        and 14 <= new_temp <= 24
+    ):
+        positive_changes.append("Temperature is now comfortable.")
+
+    if (
+        old_facts["max_wind_gusts_10m"] >= 40
+        and new_facts["max_wind_gusts_10m"] < 40
+    ):
+        positive_changes.append("Wind has calmed down.")
+
+    if old_facts["max_snowfall"] > 0 and new_facts["max_snowfall"] == 0:
+        positive_changes.append("Snow has stopped.")
+
+    any_negative = bool(important_changes or regular_changes)
+    any_positive = bool(positive_changes)
+
     return {
-        "important_change": bool(important_changes or regular_changes),
+        "important_change": any_negative or any_positive,
         "has_important_changes": bool(important_changes),
+        "has_positive_changes": any_positive,
         "changes": changes,
         "important_changes": important_changes,
         "regular_changes": regular_changes,
+        "positive_changes": positive_changes,
         "facts": {
             "old": old_facts,
             "new": new_facts,

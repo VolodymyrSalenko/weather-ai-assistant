@@ -1,7 +1,6 @@
 """Understand and answer free-text weather questions using OpenRouter and prepared forecast context."""
 
 import json
-import logging
 import os
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -291,12 +290,6 @@ def understand_weather_question(
         temperature=0.1,
     )
     parsed = parse_json_message(message)
-    logging.info(
-        "intent_debug | history=%r | user_text=%r | parsed=%s",
-        history_context[:500] if history_context else "",
-        user_text,
-        json.dumps(parsed, ensure_ascii=False),
-    )
     time_period = normalized_time_period(parsed.get("time_period"))
 
     raw_missing_field = parsed.get("missing_field")
