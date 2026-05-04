@@ -27,14 +27,18 @@ def detect_weather_changes(
     old_weather_json: dict[str, Any],
     new_weather_json: dict[str, Any],
     day: str = "today",
+    bad_weather_sensitivity: str = "medium",
 ) -> dict[str, Any]:
     old_facts = forecast_facts(old_weather_json, day)
     new_facts = forecast_facts(new_weather_json, day)
     changes = []
 
+    rain_thresholds = {"high": 30, "medium": 50, "low": 70}
+    rain_threshold = rain_thresholds.get(bad_weather_sensitivity, 50)
+
     if (
-        old_facts["max_precipitation_probability"] < 50
-        and new_facts["max_precipitation_probability"] >= 50
+        old_facts["max_precipitation_probability"] < rain_threshold
+        and new_facts["max_precipitation_probability"] >= rain_threshold
     ):
         changes.append("Rain becomes likely.")
 
@@ -54,9 +58,21 @@ def detect_weather_changes(
     ):
         changes.append("Big temperature change.")
 
+    important_changes = []
+    regular_changes = []
+
+    for change in changes:
+        if "Rain" in change:
+            regular_changes.append(change)
+        else:
+            important_changes.append(change)
+
     return {
-        "important_change": bool(changes),
+        "important_change": bool(important_changes or regular_changes),
+        "has_important_changes": bool(important_changes),
         "changes": changes,
+        "important_changes": important_changes,
+        "regular_changes": regular_changes,
         "facts": {
             "old": old_facts,
             "new": new_facts,

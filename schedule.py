@@ -104,6 +104,7 @@ async def update_weather_for_locations(locations: list[dict[str, Any]]) -> None:
 async def send_weather_change_alerts(
     bot: Bot,
     location: dict[str, Any],
+    old_weather_json: dict[str, Any],
     new_weather_json: dict[str, Any],
     weather_changes: dict[str, Any],
 ) -> None:
@@ -115,6 +116,13 @@ async def send_weather_change_alerts(
 
     for preferences in preferences_rows:
         if preferences.get("daytime_alerts") == "none":
+            continue
+
+        daytime_alerts = preferences.get("daytime_alerts") or "important"
+
+        # "important" users only get snow, wind, temperature changes.
+        # "all" users also get rain changes.
+        if daytime_alerts == "important" and not weather_changes.get("has_important_changes"):
             continue
 
         if is_quiet_time(preferences, now):
@@ -130,8 +138,19 @@ async def send_weather_change_alerts(
         if already_sent:
             continue
 
+        user_sensitivity = preferences.get("bad_weather_sensitivity") or "medium"
+        user_result = detect_weather_changes(
+            old_weather_json,
+            new_weather_json,
+            day="today",
+            bad_weather_sensitivity=user_sensitivity,
+        )
+
+        if not user_result["important_change"]:
+            continue
+
         context = build_weather_context(new_weather_json, preferences, location, day="today")
-        context["weather_changes"] = weather_changes
+        context["weather_changes"] = user_result
 
         try:
             message = await asyncio.to_thread(generate_ai_advice, context)
@@ -181,12 +200,21 @@ async def update_active_weather_for_locations(locations: list[dict[str, Any]], b
             if new_weather_json is None:
                 continue
 
-            result = detect_weather_changes(old_weather_json, new_weather_json, day="today")
+            result = detect_weather_changes(
+                old_weather_json,
+                new_weather_json,
+                day="today",
+                bad_weather_sensitivity="high",
+            )
 
             if result["important_change"]:
-                logger.info("Today changes for %s: %s", location_label(location), ", ".join(result["changes"]))
+                logger.info(
+                    "Today changes for %s: %s",
+                    location_label(location),
+                    ", ".join(result["changes"]),
+                )
                 if bot is not None:
-                    await send_weather_change_alerts(bot, location, new_weather_json, result)
+                    await send_weather_change_alerts(bot, location, old_weather_json, new_weather_json, result)
         except Exception:
             logger.exception("Weather update failed for %s", location_label(location))
 
