@@ -1,6 +1,7 @@
 """Understand and answer free-text weather questions using OpenRouter and prepared forecast context."""
 
 import json
+import logging
 import os
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -34,6 +35,15 @@ clearly answers what the user wants, set needs_clarification to false
 and fill location and time_period from the history when the current
 message lacks them.
 
+When the conversation history mentions several different locations or
+time periods, always use the MOST RECENT one. The history is in
+chronological order: the last messages are the most recent. Earlier
+messages are older context. If the user asks a follow-up like
+"and for the whole week" or "what about activities?", apply it to
+the most recent location and topic, not to the first one mentioned.
+If the user explicitly corrects ("I mean in Bern", "no, in Lausanne"),
+trust the correction and use that location instead.
+
 The user message is the last message. Earlier messages are context only.
 Do not respond to earlier messages, only the last one.
 
@@ -61,10 +71,15 @@ I can help only with weather and daily planning.
 If the question is not about weather or daily planning, set is_weather_related to false and reply to:
 I can help only with weather and daily planning.
 If the question has placeholders like [city], [day], [clothes], or [activity], ask a short clarifying question.
+A 4-digit number is a Swiss postal code and counts as a location.
+If the user sends only a 4-digit number or a 4-digit number with
+a city name, treat it as a weather question for that location and
+set use_saved_location to false and location to the postal code.
 If no location is given, use_saved_location should be true.
 If no date or time period is given, use today.
 Use the provided current date to resolve relative dates.
 Time period rules: today is current_date; tomorrow is current_date + 1 day; day_after_tomorrow is current_date + 2 days; weekend is the next Saturday through Sunday; week is the next 7 days starting current_date; specific_date is a parsed user date in ISO format; unknown means you need a short clarification.
+A multi-day period (week, weekend) is a complete and valid answer for any weather question, including rain duration, temperature, clothing, or activities. If the user provides a multi-day period, do NOT ask for a specific day. Set needs_clarification to false and return the multi-day period in time_period. The system handles multi-day answers correctly.
 Do not invent dates, places, or user details.
 Set missing_field to "location" if the question needs a location and none is given and use_saved_location is false.
 Set missing_field to "day" if the question needs a day and the time period type is "unknown".
@@ -269,6 +284,12 @@ def understand_weather_question(
         temperature=0.1,
     )
     parsed = parse_json_message(message)
+    logging.info(
+        "intent_debug | history=%r | user_text=%r | parsed=%s",
+        history_context[:500] if history_context else "",
+        user_text,
+        json.dumps(parsed, ensure_ascii=False),
+    )
     time_period = normalized_time_period(parsed.get("time_period"))
 
     raw_missing_field = parsed.get("missing_field")
@@ -290,10 +311,17 @@ def understand_weather_question(
     if not result["is_weather_related"]:
         result["reply"] = NON_WEATHER_REPLY
 
+    # Only force clarification if AI also requested it.
+    # If AI says no clarification needed but time_period is unknown,
+    # default to "today" silently instead of asking the user.
     if result["is_weather_related"] and time_period["type"] == "unknown":
-        result["needs_clarification"] = True
-        result["clarifying_question"] = result["clarifying_question"] or "Which day should I check?"
-        result["missing_field"] = "day"
+        if result["needs_clarification"]:
+            result["clarifying_question"] = result["clarifying_question"] or "Which day should I check?"
+            result["missing_field"] = "day"
+        else:
+            # AI handled it — fall back to today
+            result["time_period"] = normalized_time_period({"type": "today"})
+            result["missing_field"] = None
 
     return result
 

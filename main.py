@@ -154,6 +154,17 @@ def parse_day_reply(text: str) -> dict | None:
     return None
 
 
+def is_date_within_forecast_range(period: dict) -> bool:
+    """Check if the period's start_date is within the 7-day forecast."""
+    today = datetime.now(ZURICH_TZ).date()
+    max_date = today + timedelta(days=6)
+    try:
+        start = date.fromisoformat(period.get("start_date") or "")
+    except (TypeError, ValueError):
+        return True
+    return today <= start <= max_date
+
+
 def clear_wizard_state(user_id: int) -> None:
     ask_wizard_states.pop(user_id, None)
 
@@ -343,8 +354,15 @@ async def answer_weather_question(message: Message, telegram_id: int, user_text:
         await message.answer("I could not load the weather right now. Please try again later.")
         return
 
+    period = intent.get("time_period") or {}
+    if not is_date_within_forecast_range(period):
+        await message.answer(
+            "I can only forecast up to 7 days ahead. Please ask about a date within the next week."
+        )
+        return
+
     context = build_weather_period_context(
-        weather_json, preferences, location, intent.get("time_period") or {},
+        weather_json, preferences, location, period,
     )
     context["user_question"] = intent.get("cleaned_question") or user_text
     context["question_type"] = intent.get("question_type")
@@ -536,7 +554,8 @@ async def handle_wiz_day(callback: CallbackQuery) -> None:
     if day_key == "specific":
         state["step"] = "custom_date"
         await callback.message.edit_text(
-            "Type a date (e.g. 2026-05-03) or a weekday name (e.g. Monday)."
+            "Type a date (e.g. 2026-05-10) or a weekday name (e.g. Monday).\n"
+            "I can only forecast up to 7 days ahead."
         )
         return
     period = parse_day_reply(period_label_from_callback(day_key).lower())
@@ -654,6 +673,11 @@ async def handle_other_messages(message: Message) -> None:
             if period is None:
                 await message.answer(
                     "I didn't catch the date. Try a date like 2026-05-03 or a weekday name."
+                )
+                return
+            if not is_date_within_forecast_range(period):
+                await message.answer(
+                    "I can only forecast up to 7 days ahead. Please pick a date within the next week."
                 )
                 return
             wizard_state["period"] = period
